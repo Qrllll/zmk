@@ -29,12 +29,14 @@ struct vector2d {
 struct movement_state_1d {
     float remainder;
     int16_t speed;
-    int64_t start_time;
 };
 
 struct movement_state_2d {
     struct movement_state_1d x;
     struct movement_state_1d y;
+    // Shared by both axes (like QMK's mk_repeat): set when any direction becomes active,
+    // cleared only when both axes are idle, so velocity survives direction changes.
+    int64_t start_time;
 };
 
 struct behavior_input_two_axis_data {
@@ -135,14 +137,15 @@ static void track_remainder(float *move, float *remainder) {
 }
 
 static float update_movement_1d(const struct behavior_input_two_axis_config *config, uint16_t code,
-                                struct movement_state_1d *state, int64_t now) {
+                                struct movement_state_1d *state, int64_t start_time,
+                                int64_t now) {
     float move = 0;
     if (state->speed == 0) {
         state->remainder = 0;
         return move;
     }
 
-    int64_t move_duration = ticks_since_start(state->start_time, now, config->delay_ms);
+    int64_t move_duration = ticks_since_start(start_time, now, config->delay_ms);
     LOG_DBG("Calculated speed: %f", (double)speed(config, code, state->speed, move_duration));
     move =
         (move_duration > 0)
@@ -158,8 +161,8 @@ static struct vector2d update_movement_2d(const struct behavior_input_two_axis_c
     struct vector2d move = {0};
 
     move = (struct vector2d){
-        .x = update_movement_1d(config, config->x_code, &state->x, now),
-        .y = update_movement_1d(config, config->y_code, &state->y, now),
+        .x = update_movement_1d(config, config->x_code, &state->x, state->start_time, now),
+        .y = update_movement_1d(config, config->y_code, &state->y, state->start_time, now),
     };
 
     return move;
@@ -184,9 +187,6 @@ static void tick_work_cb(struct k_work *work) {
 
     uint64_t timestamp = k_uptime_ticks();
 
-    // LOG_INF("x start: %llu, y start: %llu, current timestamp: %llu", data->state.x.start_time,
-    //         data->state.y.start_time, timestamp);
-
     struct vector2d move = update_movement_2d(cfg, &data->state, timestamp);
 
     int ret = 0;
@@ -206,16 +206,14 @@ static void tick_work_cb(struct k_work *work) {
     }
 }
 
-static void set_start_times_for_activity_1d(struct movement_state_1d *state) {
-    if (state->speed != 0 && state->start_time == 0) {
-        state->start_time = k_uptime_ticks();
-    } else if (state->speed == 0) {
+static void set_start_times_for_activity(struct movement_state_2d *state) {
+    if (is_non_zero_2d_movement(state)) {
+        if (state->start_time == 0) {
+            state->start_time = k_uptime_ticks();
+        }
+    } else {
         state->start_time = 0;
     }
-}
-static void set_start_times_for_activity(struct movement_state_2d *state) {
-    set_start_times_for_activity_1d(&state->x);
-    set_start_times_for_activity_1d(&state->y);
 }
 
 static void update_work_scheduling(const struct device *dev) {
